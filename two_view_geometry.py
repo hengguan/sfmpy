@@ -21,31 +21,32 @@ def estimate_fundamental_matrix(xs1: NDArray, xs2: NDArray, num_iter=100, min_ra
         choosed.add(tuple(idxs))
         A = np.stack([(np.expand_dims(homo_xs2[i], 1) @ np.expand_dims(homo_xs1[i], 0)).flatten() for i in idxs])
         u, s, vh = scipy.linalg.svd(A)
-        print(u.shape, s.shape, vh.shape)
+        print(s, vh)
         min_ind = np.argsort(s)[0]
-        print(s[min_ind])
-        if s[min_ind] == 0:
-            ret_mat = vh[-1].reshape(3, 3)
-        else:
-            s[min_ind] = 0
-            s_mat = np.concatenate([np.diag(s), np.ones((8, 1))], axis=1)
-            print(u.shape, s_mat.shape, vh.shape)
-            new_A = u @ s_mat @ vh
-            u, s, vh = scipy.linalg.svd(new_A)
-            min_ind = np.argsort(s)[0]
-            print(s[min_ind])
-            assert s[min_ind] == 0, "svd not true"
-            ret_mat = vh[-1].reshape(3, 3)
+        print(s[min_ind], min_ind)
+        ret_mat = vh[-1].reshape(3, 3)
+        rank = np.linalg.matrix_rank(ret_mat)
+        if rank == 3:
+            u, s, vh = scipy.linalg.svd(ret_mat)
+            print(s)
+            s[-1] = 0
+            ret_mat = u @ np.diag(s) @ vh
+        elif rank < 2:
+            print("ret matrix rank is not true")
+            continue
         
-        line = ret_mat @ homo_xs1.T
-        m = np.linalg.norm(line[:2].T, axis=1)
-        v = np.sum(homo_xs2 * line.T, axis=1)
-        valid = m != 0
-        dist = np.abs(v[valid] / m[valid])
-        inlier_mask = dist <= threshold
+        dist, valid = distance_to_epipole_line(ret_mat, homo_xs1, homo_xs2)
+        inlier_mask[valid] = dist <= threshold
         curr_ratio = np.count_nonzeros(inlier_mask) / num_pairs
 
         num_iter += 1
     return ret_mat, inlier_mask
 
-    
+
+def distance_to_epipole_line(F12, homo_xs1, homo_xs2):
+    line = F12 @ homo_xs1.T
+    m = np.linalg.norm(line[:2].T, axis=1)
+    v = np.sum(homo_xs2 * line.T, axis=1)
+    valid = m != 0
+    dist = np.abs(v[valid] / m[valid])
+    return dist, valid

@@ -1,14 +1,20 @@
+import argparse
 import numpy as np
 from pathlib import Path
 import cv2
 import itertools
 
-from pyrecon.models import LightGlueInfer, SuperPointInfer
-from pyrecon.utils import rbd
+from feature_process import LightGlueInfer, SuperPointInfer
+# from pyrecon.utils import rbd
 from two_view_geometry import estimate_fundamental_matrix
 
 
-data_dir = Path("/home/gh/workspace/data/P3Data") 
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-dir", type=str, help="Path to dataset directory.")
+parser.add_argument("--model-dir", type=str, help="Path to model weights directory.")
+args = parser.parse_args()
+
+data_dir = Path(args.data_dir) 
 image_dir = data_dir / "images"
 
 img_paths = [i for i in image_dir.glob("*png")]
@@ -16,7 +22,7 @@ matches_files = [i for i in data_dir.glob("*txt")]
 with open(data_dir/"calibration.txt", "r") as f:
     K = np.array([[float(val) for val in line.strip("\n").split(" ")] for line in f.readlines()])
 
-model_dir = "/home/gh/workspace/model_weights/"
+model_dir = args.model_dir
 superpoint_cfg = {
     'descriptor_dim': 256,
     'nms_radius': 4,
