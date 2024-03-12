@@ -63,7 +63,8 @@ for i, j in itertools.permutations(range(len(feats)), 2):
 
     ret_mat, inlier = estimate_fundamental_matrix(
         prev_kps[mask_prev],
-        curr_kps[mask_curr]
+        curr_kps[mask_curr],
+        num_iter=1000
     )
     if ret_mat is None:
         continue
@@ -78,8 +79,8 @@ for i, j in itertools.permutations(range(len(feats)), 2):
         cv2.circle(viz, curr_pt, 3, (0, 0, 255), thickness=-1)
         if inlier[idx]:
             cv2.line(viz, prev_pt, curr_pt, (0, 255, 0), thickness=1)
-        else:
-            cv2.line(viz, prev_pt, curr_pt, (255, 0, 0), thickness=1)
+        # else:
+        #     cv2.line(viz, prev_pt, curr_pt, (255, 0, 0), thickness=1)
     cv2.imshow("viz", viz)
     cv2.waitKey(0)
 
