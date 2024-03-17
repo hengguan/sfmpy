@@ -3,10 +3,25 @@ import numpy as np
 from pathlib import Path
 import cv2
 import itertools
+from tqdm import tqdm
 
 from feature_process import LightGlueInfer, SuperPointInfer
 # from pyrecon.utils import rbd
-from two_view_geometry import estimate_fundamental_matrix
+from two_view_geometry import (
+    estimate_fundamental_matrix, 
+    recover_pose_from_F,
+    linear_triangulation,
+    homo_points,
+)
+from optimization import least_square_opt
+from geometry import reproj_points, linear_pnp
+from reconstructor import (
+    Camera,
+    Image,
+    TwoViewGeometry,
+    Reconstructor,
+)
+from viz import viz_match, viz_epipolar_line, show_points_3d, vis_reproj
 
 
 parser = argparse.ArgumentParser()
@@ -21,6 +36,11 @@ img_paths = [i for i in image_dir.glob("*png")]
 matches_files = [i for i in data_dir.glob("*txt")]
 with open(data_dir/"calibration.txt", "r") as f:
     K = np.array([[float(val) for val in line.strip("\n").split(" ")] for line in f.readlines()])
+cameras = dict()
+images = dict()
+two_view_geometries = dict()
+
+cameras[0] = Camera(0, K)
 
 model_dir = args.model_dir
 superpoint_cfg = {
@@ -39,48 +59,121 @@ lightglue_cfg = {
 }
 matcher = LightGlueInfer(lightglue_cfg)
 
-print(K)
 feats = []
-images = []
+# images = dict() 
 # extract features
-for imgf in img_paths:
+for idx, imgf in enumerate(img_paths):
     img = cv2.imread(str(imgf))
-    feats.append(extractor(img))
-    images.append(img)
+    feat = extractor(img)
+    feats.append(feat)
+    kps = feat["keypoints"].cpu().numpy()[0]
+    images[idx] = Image(
+        id_=idx,
+        R=np.eye(3),
+        t=np.zeros((3,1)),
+        kps=kps,
+        camera_id=0,
+        name=imgf.name,
+        points3d_idxs=np.full(len(kps), -1, np.int32)
+    )
 
-for i, j in itertools.permutations(range(len(feats)), 2):
-    print(i, j)
-    matches = matcher(feats[i], feats[j])['matches0'].cpu().numpy()
-    matches_pairs = [[prev_idx, curr_idx] for prev_idx, curr_idx in enumerate(matches) if curr_idx >= 0]
+print("Run match between image.")
+pairs = [(i, j) for i, j in itertools.permutations(range(len(feats)), 2)]
+for p in tqdm(pairs):
+    matches = matcher(feats[p[0]], feats[p[1]])['matches0'].cpu().numpy()
+    # matches_pairs = [[prev_idx, curr_idx] for prev_idx, curr_idx in enumerate(matches) if curr_idx >= 0]
     mask = matches > -1
     mask_curr = matches[mask]
     mask_prev = np.argwhere(mask)[:, 0]
-    print(mask.shape, mask_curr.shape)
-
-    prev_kps = feats[i]['keypoints'].cpu().numpy()[0]
-    curr_kps = feats[j]['keypoints'].cpu().numpy()[0]
-    print(prev_kps.shape, curr_kps.shape)
-
-    ret_mat, inlier = estimate_fundamental_matrix(
-        prev_kps[mask_prev],
-        curr_kps[mask_curr],
-        num_iter=1000
+    two_view_geometries[p] = TwoViewGeometry(
+        id_=p,
+        matches=np.vstack([mask_prev, mask_curr]),
+        inliers=np.ones_like(matches)
     )
-    if ret_mat is None:
-        continue
+
+reconstruct = Reconstructor(cameras, images, two_view_geometries)
+
+for idx, tvg in enumerate(reconstruct.two_view_geometries.values()):
+    if len(reconstruct.registered) == 0:
+        im_id1, im_id2 = tvg.id_
+        img1 = reconstruct.images[tvg.id_[0]]
+        img2 = reconstruct.images[tvg.id_[1]]
+        cam1 = reconstruct.cameras[img1.camera_id]
+        cam2 = reconstruct.cameras[img2.camera_id]
+
+        match_prev_kps = img1.kps[tvg.matches[0]]
+        match_curr_kps = img2.kps[tvg.matches[1]]
+
+        ret, R, t, mask = recover_pose_from_F(
+            np.eye(3),
+            cam1.K,
+            cam2.K,
+            match_prev_kps,
+            match_curr_kps
+        )
+        if not ret:
+            exit()
+
+        mask = mask[:, 0].astype(np.bool_)
+        tri_prev_kps = match_prev_kps[mask]
+        tri_curr_kps = match_curr_kps[mask]
+        P1 = np.concatenate([cam1.K, np.zeros((3, 1))], axis=1)
+        P2 = cam2.K @ np.concatenate([R, t], axis=1)
+        pts3d = linear_triangulation(
+            P1,
+            P2,
+            homo_points(tri_prev_kps),
+            homo_points(tri_curr_kps)
+        )[:, :3]
+        # points4d = cv2.triangulatePoints(
+        #     P1,
+        #     P2,
+        #     tri_prev_kps.T,
+        #     tri_curr_kps.T
+        # )
+        # pts3d = points4d[:3, :].T / points4d[3:4, :].T
+
+        new_pts3d, errors = least_square_opt(
+            pts3d,
+            tri_prev_kps,
+            tri_curr_kps,
+            P1,
+            P2,
+        )
+        viz_ = cv2.imread(str(image_dir/img2.name))
+        viz = vis_reproj(
+            viz_,
+            new_pts3d,
+            tri_curr_kps,
+            cam2.K,
+            R, 
+            t
+        )
+        img2.R = R
+        img2.t = t
+        # img2.points3d_idxs = 
+        reconstruct.registered += [im_id1, im_id2]
+        reconstruct.points3d = {idx: pt for idx, pt in enumerate(new_pts3d)}
+        reconstruct.num_pts = len(new_pts3d)
+
+    
+    
 
     # debug matches
-    viz = np.concatenate([images[i], images[j]], axis=1)
-    h, w = images[j].shape[:2]
-    for idx, (pi, ci) in enumerate(matches_pairs):
-        prev_pt = prev_kps[pi].astype(np.int32)
-        curr_pt = curr_kps[ci].astype(np.int32)+[w, 0]
-        cv2.circle(viz, prev_pt, 3, (0, 0, 255), thickness=-1)
-        cv2.circle(viz, curr_pt, 3, (0, 0, 255), thickness=-1)
-        if inlier[idx]:
-            cv2.line(viz, prev_pt, curr_pt, (0, 255, 0), thickness=1)
-        # else:
-        #     cv2.line(viz, prev_pt, curr_pt, (255, 0, 0), thickness=1)
+    # viz_match(
+    #     viz,
+    #     prev_kps[mask_prev],
+    #     curr_kps[mask_curr] + images[j].shape[1],
+    #     inlier
+    # )
+    # viz = viz_epipolar_line(
+    #     images[j].copy(),
+    #     images[i].copy(),
+    #     curr_kps[mask_curr],
+    #     prev_kps[mask_prev],
+    #     ret_val,
+    #     mask,
+    # )
     cv2.imshow("viz", viz)
     cv2.waitKey(0)
 
